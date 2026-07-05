@@ -1,0 +1,77 @@
+# Sensor + cron registry — source of truth for the signal-triage-notify tap.
+# Layer 1 sensors append to the resolved signals_dir (see _sensorlib.resolve_paths).
+# Layer 2/3 are the signal-triage / signal-notify Hermes skills.
+# setup.py (and its install-sensors.sh alias) read this and idempotently sync
+# `hermes cron` jobs.
+#
+# Fields:
+#   name       cron job name (unique)
+#   layer      1=sensor, 2=triage, 3=notify
+#   script     script filename, resolved under ~/.hermes/scripts/signal-triage-notify/
+#              (Hermes only executes no-agent cron scripts from ~/.hermes/scripts/)
+#   skill      skill name (agent jobs)
+#   prompt     prompt for agent jobs
+#   cadence    cron expression
+#   category   daily-log section the sensor writes to (sensors only)
+#   deliver    local | telegram | origin
+#   enabled    true|false  (agent jobs start disabled until you enable them)
+
+sensors:
+  - name: gmail-poll
+    layer: 1
+    script: gmail_sensor.sh
+    cadence: "*/15 * * * *"
+    category: Email
+    deliver: local
+    enabled: true
+
+  - name: github-poll
+    layer: 1
+    script: github_sensor.sh
+    cadence: "50 * * * *"
+    category: GitHub
+    deliver: local
+    enabled: true
+
+  - name: weather-poll
+    layer: 1
+    script: weather_sensor.sh
+    cadence: "0 5 * * *"
+    category: Context
+    deliver: local
+    enabled: true
+
+  - name: ics-poll
+    layer: 1
+    script: ics_sensor.sh
+    cadence: "*/30 * * * *"
+    category: Calendar
+    deliver: local
+    enabled: true
+
+agents:
+  - name: signal-triage
+    layer: 2
+    skill: signal-triage
+    cadence: "0 6-23 * * *"
+    deliver: local
+    enabled: false   # enable after watching the triage log for a few days
+    prompt: >-
+      Autonomous hourly triage sweep. Load and follow the signal-triage skill.
+      Do not ask questions. Read today's raw signal log, classify new items,
+      write the triage log, and propose actions into the ledger. Do not send
+      notifications or write the calendar yourself — that is signal-notify's
+      job.
+
+  - name: signal-notify
+    layer: 3
+    skill: signal-notify
+    cadence: "10 6-23 * * *"
+    deliver: telegram
+    enabled: false   # enable after triage output looks right
+    prompt: >-
+      Autonomous hourly notify dispatch. Load and follow the signal-notify
+      skill. Do not ask questions. Execute pending actions from the ledger:
+      create attendee-free calendar events with reminders, and alert on the
+      configured channel for URGENT items. Mark each action done/failed. If
+      nothing is pending, respond with a single line beginning [SILENT].

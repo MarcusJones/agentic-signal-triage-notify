@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agentskills.io/schema/index.json",
+  "skills": [
+    {
+      "name": "signal-triage",
+      "description": "Layer 2 of the signal-triage-notify system. Hourly LLM sweep that classifies new situational-awareness items and proposes actions into the ledger.",
+      "path": "skills/signal-triage",
+      "version": "0.1.0"
+    },
+    {
+      "name": "signal-notify",
+      "description": "Layer 3 of the signal-triage-notify system. Dispatches pending actions (calendar writes, alerts) and bundles the Layer-1 sensor framework.",
+      "path": "skills/signal-notify",
+      "version": "0.1.0"
+    }
+  ]
+}

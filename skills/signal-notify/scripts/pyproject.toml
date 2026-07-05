@@ -1,0 +1,15 @@
+[project]
+name = "signal-triage-notify-sensors"
+version = "0.1.0"
+description = "No-agent Layer-1 sensors for the signal-triage-notify Hermes tap"
+requires-python = ">=3.11"
+dependencies = [
+  "google-api-python-client==2.187.0",
+  "google-auth==2.41.1",
+  "google-auth-oauthlib==1.2.3",
+  "pyyaml>=6.0",
+  "platformdirs>=4.0",
+]
+
+[tool.uv]
+package = false
