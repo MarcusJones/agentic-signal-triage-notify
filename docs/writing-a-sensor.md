@@ -39,6 +39,22 @@ if __name__ == "__main__":
 - Keep the script idempotent: re-running it with no new upstream data must be
   a no-op (no duplicate log lines, no state corruption).
 
+## Give your entries a stable handle
+
+The Layer-1.5 prefilter derives an idempotency id per entry via
+`_sensorlib.source_id()`. Entries that carry a unique machine handle
+(`gmail_message_id=…`, `ics_uid=…`, or your own `mysensor_id=…` added to the
+patterns in `_sensorlib._SID_PATTERNS`) get exact-once triage for free.
+Entries without one fall back to `line:<sha1[:12]>` of the whole trimmed
+line — safe, but the item re-surfaces if the line is ever reformatted, and
+context-summary sensors that re-emit the same body each poll will be judged
+once per distinct wording. If your sensor updates the same logical item over
+time, a stable handle is strongly recommended.
+
+Also: always pass `detected_at` (`append_signal` stamps it for you) — the
+prefilter's batch debounce reads it; entries without a parseable stamp are
+treated as "old enough" and flush immediately.
+
 ## Wrapper script
 
 Ship a matching `.sh` launcher so Hermes' no-agent cron runner can execute it

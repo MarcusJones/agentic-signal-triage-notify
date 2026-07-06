@@ -49,29 +49,41 @@ sensors:
     deliver: local
     enabled: true
 
+# Layer 2/3 agent jobs. `script` is the Layer-1.5 prefilter/wake-gate hook:
+# its stdout is injected into the agent prompt; a last stdout line of
+# {"wakeAgent": false} skips the LLM run entirely (poll-fast/flush-slow —
+# the frequent polls below are free when gated). Optional per-job `model:` /
+# `provider:` route scheduled judging to a cheaper model than your
+# interactive default. Set `prefilter: false` on a job to opt out of the
+# script hook (v0.1 behavior).
 agents:
   - name: signal-triage
     layer: 2
     skill: signal-triage
-    cadence: "0 6-23 * * *"
+    script: triage_prefilter.sh
+    cadence: "*/15 6-23 * * *"
     deliver: local
     enabled: false   # enable after watching the triage log for a few days
+    # model: ""      # optional cheap-model override; verify your endpoint's allow-list
     prompt: >-
-      Autonomous hourly triage sweep. Load and follow the signal-triage skill.
-      Do not ask questions. Read today's raw signal log, classify new items,
-      write the triage log, and propose actions into the ledger. Do not send
-      notifications or write the calendar yourself — that is signal-notify's
-      job.
+      Autonomous triage sweep. Load and follow the signal-triage skill.
+      Do not ask questions. A deterministic prefilter block at the top of
+      this prompt lists the NEW items with source ids pre-derived — trust it
+      for discovery and classify them, write the triage log, and propose
+      actions into the ledger. Do not send notifications or write the
+      calendar yourself — that is signal-notify's job.
 
   - name: signal-notify
     layer: 3
     skill: signal-notify
-    cadence: "10 6-23 * * *"
+    script: notify_prefilter.sh
+    cadence: "5,35 6-23 * * *"
     deliver: telegram
     enabled: false   # enable after triage output looks right
+    # model: ""      # optional cheap-model override; verify your endpoint's allow-list
     prompt: >-
-      Autonomous hourly notify dispatch. Load and follow the signal-notify
-      skill. Do not ask questions. Execute pending actions from the ledger:
+      Autonomous notify dispatch. Load and follow the signal-notify skill.
+      Do not ask questions. Execute pending actions from the ledger:
       create attendee-free calendar events with reminders, and alert on the
       configured channel for URGENT items. Mark each action done/failed. If
       nothing is pending, respond with a single line beginning [SILENT].

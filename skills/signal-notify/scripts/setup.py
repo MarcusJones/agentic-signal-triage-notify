@@ -97,6 +97,19 @@ def existing_cron_names() -> set:
         return set()
 
 
+def _job_id_by_name(name: str) -> str | None:
+    try:
+        out = subprocess.run(["hermes", "cron", "list", "--json"], capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        for j in json.loads(out.stdout).get("jobs", []):
+            if j.get("name") == name:
+                return j.get("id")
+    except Exception:
+        pass
+    return None
+
+
 def sync_cron(runtime_dir: Path, dry_run: bool) -> None:
     log("==> syncing hermes cron jobs from registry.yaml")
     import yaml
@@ -120,17 +133,37 @@ def sync_cron(runtime_dir: Path, dry_run: bool) -> None:
 
     for job in reg.get("agents", []):
         name = job["name"]
+        # Layer-1.5 prefilter/wake-gate hook (v0.2). `prefilter: false` in
+        # registry.yaml opts a job out (v0.1 behavior). Script paths are
+        # relative to ~/.hermes/scripts/ per Hermes' cron script policy.
+        script = None
+        if job.get("script") and job.get("prefilter", True):
+            script = f"signal-triage-notify/{Path(job['script']).name}"
         if name in existing:
-            log(f"    = {name} (exists, skip)")
+            if script:
+                # Existing install upgrading to v0.2: attach the prefilter +
+                # new cadence. `hermes cron edit` takes a job id; resolve by
+                # name. Best-effort — verify subcommand shape against your CLI.
+                jid = _job_id_by_name(name)
+                if jid and not dry_run:
+                    subprocess.run(
+                        ["hermes", "cron", "edit", jid, "--schedule", job["cadence"],
+                         "--script", script],
+                        check=False,
+                    )
+                log(f"    ~ {name} (exists — synced cadence [{job['cadence']}] + script {script})")
+            else:
+                log(f"    = {name} (exists, skip)")
             continue
         prompt = (job.get("prompt") or "").strip()
-        log(f"    + {name}  skill={job['skill']}  [{job['cadence']}]  created DISABLED")
+        create_cmd = ["hermes", "cron", "create", job["cadence"], prompt, "--skill", job["skill"],
+                      "--name", name, "--deliver", job.get("deliver", "local")]
+        if script:
+            create_cmd += ["--script", script]
+        extras = f" script={script}" if script else ""
+        log(f"    + {name}  skill={job['skill']}  [{job['cadence']}]{extras}  created DISABLED")
         if not dry_run:
-            subprocess.run(
-                ["hermes", "cron", "create", job["cadence"], prompt, "--skill", job["skill"],
-                 "--name", name, "--deliver", job.get("deliver", "local")],
-                check=True,
-            )
+            subprocess.run(create_cmd, check=True)
             # Best-effort: pause by name. Verify this subcommand shape against
             # your installed `hermes` CLI — see docs/writing-a-sensor.md.
             subprocess.run(["hermes", "cron", "pause", "--name", name], check=False)

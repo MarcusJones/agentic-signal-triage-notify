@@ -8,7 +8,7 @@ description: >-
   done/failed. Idempotent. Use for the scheduled signal-notify cron, or when
   asked to "send the pending notifications". Bundles the Layer-1 sensor
   framework this system runs on.
-version: 0.1.0
+version: 0.2.0
 author: signal-triage-notify contributors
 license: MIT
 metadata:
@@ -66,6 +66,10 @@ on, under `${HERMES_SKILL_DIR}/scripts/`:
   credential setup steps). Run `${HERMES_SKILL_DIR}/scripts/setup.sh` once
   after installing this tap.
 - `signal_ledger.py` — action queue + idempotency ledger.
+- `triage_prefilter.py` / `notify_prefilter.py` (+ `.sh`/`.ps1` launchers) —
+  Layer-1.5 deterministic prefilters and wake gates: they do discovery,
+  batching, and bookkeeping before any LLM tokens are spent, and skip the
+  agent run entirely (`{"wakeAgent": false}`) when there is nothing to do.
 - `gcal_write.py` — attendee-free calendar event creation with custom
   reminders and a duplicate guard.
 - `bootstrap_oauth.py` — laptop/browser-machine-only Gmail OAuth bootstrap.
@@ -90,7 +94,8 @@ GCAL="uv run --project $SD python $SD/gcal_write.py"
 2. **Get pending actions:** `$LEDGER pending` → JSON list of rows with
    `source_id, kind, channel, classification, payload`. If empty, stop: reply
    with a single line beginning `[SILENT]` (e.g. `[SILENT] no pending
-   notifications`).
+   notifications`). On cron this rarely happens — the `notify_prefilter`
+   wake gate only wakes you when actionable rows exist.
 
 ## Dispatch each pending action
 
@@ -129,8 +134,10 @@ $GCAL create --summary "<summary>" --start "<ISO+offset>" --end "<ISO+offset>" \
 
 ### kind = none
 
-Nothing to dispatch (these were settled by triage for idempotency). Mark them
-`done` so `$LEDGER pending` stays reserved for genuinely actionable `alert` /
+Nothing to dispatch (these were settled by triage for idempotency). On cron,
+`notify_prefilter` normally settles these deterministically before you wake —
+you'll only see stragglers proposed mid-run. Mark any you do see `done` so
+`$LEDGER pending` stays reserved for genuinely actionable `alert` /
 `create_event` rows:
 
 ```bash

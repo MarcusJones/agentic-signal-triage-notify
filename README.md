@@ -1,6 +1,8 @@
 # signal-triage-notify
 
-A three-layer situational-awareness system for [Hermes Agent](https://hermes-agent.nousresearch.com/): cheap no-LLM sensors collect raw signals (email, calendar, GitHub, weather, …), an hourly LLM triage pass classifies what's new, and a notify layer dispatches the handful of things that actually deserve a calendar entry or an interrupt.
+A three-layer situational-awareness system for [Hermes Agent](https://hermes-agent.nousresearch.com/): cheap no-LLM sensors collect raw signals (email, calendar, GitHub, weather, …), a **gated, batched** LLM triage pass classifies what's new, and a notify layer dispatches the handful of things that actually deserve a calendar entry or an interrupt.
+
+Since v0.2 the LLM layers are behind deterministic **wake gates**: frequent polls cost zero tokens when there is nothing to judge, new items are batched by a content-blind age debounce, and pure bookkeeping is settled without waking a model at all. On the reference deployment this cut LLM runs by ~90% while *improving* worst-case alert latency.
 
 Packaged as a Hermes **tap** — a `SKILL.md`-leaf-dir repo, installable in one command, following the [agentskills.io](https://agentskills.io) open standard.
 
@@ -14,7 +16,10 @@ flowchart LR
         S4[github]
         S5[weather]
     end
-    subgraph L2["Layer 2 · Triage — hourly LLM sweep"]
+    subgraph L15["Layer 1.5 · Prefilter — no LLM (gate + batch)"]
+        PF["derive ids · diff vs ledger<br/>debounce · wakeAgent gate"]
+    end
+    subgraph L2["Layer 2 · Triage — gated LLM sweep"]
         T["classify & propose<br/>(reads policy.yaml)"]
     end
     subgraph L3["Layer 3 · Notify — dispatch to channels"]
@@ -25,7 +30,8 @@ flowchart LR
 
     S1 & S2 & S3 & S4 & S5 -->|append raw entry| DL[("daily log<br/>signals/daily/YYYY-MM-DD.md")]
     POL[/"policy.yaml"/] -.->|routing rules| T
-    DL -->|read new items| T
+    DL -->|entry lines| PF
+    PF -->|NEW items only, or skip run| T
     T -->|write surfaced view| TV[("triage view<br/>signals/triage/YYYY-MM-DD.md")]
     T -->|propose actions| LG[("action ledger<br/>ledger.db · idempotent")]
     LG -->|pending| N1
@@ -37,7 +43,13 @@ flowchart LR
 
 ## Why
 
-Most "AI assistant reads my inbox" setups either interrupt you constantly or need an LLM call per item (slow, expensive, and re-judges the same email every poll). This system separates cheap collection from judgment: Layer 1 sensors are plain scripts that run every few minutes for ~0 tokens; Layer 2 spends LLM reasoning once per hour on only the genuinely new items; Layer 3 is the only layer allowed to interrupt you or touch your calendar, and it never sends calendar invites to third parties.
+Most "AI assistant reads my inbox" setups either interrupt you constantly or need an LLM call per item (slow, expensive, and re-judges the same email every poll). This system separates cheap collection from judgment: Layer 1 sensors are plain scripts that run every few minutes for ~0 tokens; a Layer 1.5 prefilter deterministically finds what's *new*, batches it, and **skips the LLM entirely** when there's nothing to do; Layer 2 spends LLM reasoning only on genuinely new batches; Layer 3 is the only layer allowed to interrupt you or touch your calendar, and it never sends calendar invites to third parties.
+
+### Poll fast, flush slow
+
+Once empty polls are free, cadence stops being the cost driver — the wake-up is. So triage polls every 15 minutes but the LLM wakes only when the **oldest** unjudged item has waited `triage.debounce_minutes` (seeded default 30; 90 is the cost-optimal setting on the reference deployment; 0 flushes immediately). The debounce is deliberately **content-blind** — counts and timestamps only, no urgency keywords to plan ahead or rot. Notify wakes only when actionable rows are pending; bookkeeping is settled without a model. Measured effect (reference deployment, 7 days): 36 scheduled LLM runs/day → ~6–12 actual wake-ups, on cheaper per-run prompts, with urgent dispatch latency *improved* (a flush is picked up within ≤30 min instead of the old fixed hourly slots).
+
+Escape hatches: set `prefilter: false` on a job in `registry.yaml` (declarative), or `hermes cron edit <job> --script ""` (immediate) to restore plain scheduled runs.
 
 ## Works with zero config
 
@@ -63,9 +75,9 @@ After `setup.sh` finishes, it prints the OAuth (Gmail) and `gh` CLI credential s
 
 | Path | Purpose |
 |---|---|
-| `skills/signal-triage/SKILL.md` | Layer 2 — hourly classify & propose. |
+| `skills/signal-triage/SKILL.md` | Layer 2 — gated classify & propose (+ `references/` loaded on demand). |
 | `skills/signal-notify/SKILL.md` | Layer 3 — dispatch pending actions. Bundles the whole sensor framework under `scripts/`. |
-| `skills/signal-notify/scripts/` | `_sensorlib.py` (path resolution + log format), `registry.yaml` + `setup.py`/`setup.sh` (bootstrap), `signal_ledger.py`, `gcal_write.py`, `bootstrap_oauth.py`, and the example sensors (`gmail`, `github`, `weather`, `ics`). |
+| `skills/signal-notify/scripts/` | `_sensorlib.py` (path resolution + log format + source-id derivation), `triage_prefilter.py`/`notify_prefilter.py` (Layer 1.5 gates, with `.sh`/`.ps1` launchers), `registry.yaml` + `setup.py`/`setup.sh` (bootstrap), `signal_ledger.py`, `gcal_write.py`, `bootstrap_oauth.py`, and the example sensors (`gmail`, `github`, `weather`, `ics`). |
 | `docs/architecture.md` | Full three-layer design + signal-lifecycle sequence diagram. |
 | `docs/writing-a-sensor.md` | The sensor contract — how to add your own. |
 | `.well-known/skills/index.json` | Tap discovery manifest. |
@@ -84,6 +96,13 @@ Writing your own sensor for a source not listed here is straightforward — see 
 - Gmail: create a Desktop OAuth client in Google Cloud Console, enable the Gmail API, then run `bootstrap_oauth.py` on a machine with a browser (not your server) and copy the resulting `token.json` into the resolved state directory. `setup.sh` prints the exact path.
 - GitHub: requires `gh auth login` already done.
 - Calendar writes: `gcal_write.py` needs a full-scope Google token — see `docs/writing-a-sensor.md`.
+
+## Versioning
+
+Semver, tagged releases (`vX.Y.Z`), human-readable history in `CHANGELOG.md`.
+The version string lives in three places (`.well-known/skills/index.json` and
+both SKILL.md frontmatters); `scripts/bump_version.py` updates them together
+and CI fails if they ever disagree.
 
 ## License
 

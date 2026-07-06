@@ -15,20 +15,27 @@ order.
 
 from __future__ import annotations
 
-import fcntl
+import hashlib
 import json
 import os
 import re
 import tempfile
+
+try:  # POSIX file locking; Windows gets a best-effort no-op (sensors are
+    import fcntl  # single-writer per file in practice; the lock is belt+braces)
+except ImportError:  # pragma: no cover - exercised only on Windows
+    fcntl = None
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from platformdirs import user_config_dir, user_data_dir, user_state_dir
+
+# google-auth is imported lazily inside load_creds(): only the OAuth-backed
+# sensors need it, and the Layer-1.5 prefilters / tests must import this
+# module without the Google stack installed.
 
 APP_NAME = "signal-triage"
 
@@ -125,6 +132,13 @@ calendar:
   by_type: {}
   reminder_profiles:
     default: "1440,0"   # minutes before: 1 day + day-of
+
+# Layer 1.5 prefilter (triage_prefilter.py). Content-blind batching: the LLM
+# wakes only when the OLDEST unjudged item has waited debounce_minutes.
+# 30 = responsive default · 90 = cost-optimal · 0 = flush on any new item.
+triage:
+  debounce_minutes: 30
+  max_items: 120   # per-flush cap; truncation is always announced, never silent
 """
 
 
@@ -266,7 +280,10 @@ def windows_safe_filename_part(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Google OAuth (read-only sensor token)
 # ---------------------------------------------------------------------------
-def load_creds() -> Credentials:
+def load_creds():
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
     ensure_private_dir(STATE_DIR)
     if not TOKEN_PATH.exists():
         raise SystemExit(
@@ -379,11 +396,13 @@ def insert_under_heading(text: str, heading: str, entry: str) -> str:
 def file_lock(lock_path: Path):
     ensure_private_dir(lock_path.parent)
     with lock_path.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _format_handle(handles: dict[str, Any] | None) -> str:
@@ -462,3 +481,85 @@ def write_signal(source: str, frontmatter: dict[str, Any], body_lines: list[str]
         handles=None,
         detected_at=frontmatter.get("detected_at"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer 1.5 support: policy loading + stable source ids + entry parsing.
+# Single source of truth — the triage SKILL.md conventions table documents
+# THIS function; the prefilter and the agent's manual fallback both rely on it.
+# ---------------------------------------------------------------------------
+def load_policy() -> dict:
+    """Parse policy.yaml (seeded on first run). Returns {} on any failure."""
+    try:
+        import yaml
+
+        return yaml.safe_load(resolve_paths()["policy_path"].read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def line_hash(line: str) -> str:
+    """sha1[:12] of the trimmed raw entry line INCLUDING its leading list
+    marker. Hashing only the post-marker body creates a different id and
+    re-surfaces duplicates — do not change this without a ledger migration."""
+    return hashlib.sha1(line.strip().encode("utf-8")).hexdigest()[:12]
+
+
+_SID_PATTERNS = [
+    # (regex, id_template) — first match wins. Order matters: specific
+    # handles before generic fallbacks.
+    (re.compile(r"gmail_message_id=([A-Za-z0-9_-]+)"), "gmail:{0}"),
+    (re.compile(r"ics_uid=([^\s;)]+)"), "ics:{0}"),
+    (re.compile(r"\bgcal_event_id=([A-Za-z0-9_-]+)"), "gcal:{0}"),
+    (re.compile(r"\[GitHub\].*?\b([\w.-]+/[\w.-]+#\d+)"), "github:{0}"),
+]
+
+
+def source_id(line: str) -> str:
+    """Derive the stable idempotency id for one raw daily-log entry line.
+
+    Prefers the entry's machine handle; falls back to `line:<sha1[:12]>` of
+    the whole trimmed line (safe, but re-surfaces if the line is ever
+    reformatted — sensors SHOULD emit a stable handle, see
+    docs/writing-a-sensor.md).
+    """
+    s = line.strip()
+    for pattern, template in _SID_PATTERNS:
+        m = pattern.search(s)
+        if m:
+            return template.format(m.group(1))
+    return f"line:{line_hash(s)}"
+
+
+_DETECTED_AT_RE = re.compile(
+    r"detected_at=(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)"
+)
+
+
+def entry_detected_at(line: str) -> datetime | None:
+    """Parse the entry's own detected_at stamp (tz-aware); None if absent or
+    malformed. Callers treat None as 'old enough' (fail-open to waking)."""
+    m = _DETECTED_AT_RE.search(line)
+    if not m:
+        return None
+    raw = m.group(1).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def iter_entry_lines(path: Path):
+    """Yield trimmed raw entry lines (`- ...` bullets; legacy `! ` markers)
+    from a daily log file. Missing file yields nothing."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return
+    for raw in text.splitlines():
+        t = raw.strip()
+        if (t.startswith("- ") or t.startswith("! ")) and len(t) > 2:
+            yield t

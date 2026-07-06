@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test deps (prefilters need only these)
+        run: pip install pytest platformdirs pyyaml
+      - name: Run tests
+        working-directory: skills/signal-notify/scripts
+        run: pytest tests/ -q
+
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version strings must agree across index.json + SKILL.md files
+        run: python scripts/bump_version.py check
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck bash wrappers
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y shellcheck
+          shellcheck skills/signal-notify/scripts/*.sh
+
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse .ps1 wrappers
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path skills -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "SYNTAX ERRORS in $($_.FullName):"; $errors | ForEach-Object { Write-Host "  $_" }
+              $failed = $true
+            } else {
+              Write-Host "OK: $($_.FullName)"
+            }
+          }
+          if ($failed) { exit 1 }
