@@ -110,8 +110,9 @@ between skill text and prefilter code re-surfaces duplicates.
 - Triage cadence in `registry.yaml` changes from hourly to `*/15 6-23 * * *`
   (the poll is free when gated).
 - The prefilter wakes the agent only when the **oldest** unjudged item has
-  waited ≥ `debounce_minutes` (default **90**, configurable in
-  `policy.yaml`). Bursts accumulate into one wake-up; a lone item flushes
+  waited ≥ `debounce_minutes` (seeded default **30** — new users judge the
+  system by responsiveness; the reference deployment runs 90 — configurable
+  in `policy.yaml`). Bursts accumulate into one wake-up; a lone item flushes
   ~90 min after arrival; a quiet day costs zero LLM runs.
 - **Stateless**: item age comes from each entry's own `detected_at` stamp
   (already mandated by the sensor contract). No timer files, no lost state.
@@ -166,7 +167,7 @@ and uniform across item types.
 
 ```yaml
 triage:
-  debounce_minutes: 90   # 0 = flush on any new item (v0.1-like immediacy)
+  debounce_minutes: 30   # seeded default; 90 = cheapest (reference deployment); 0 = flush on any new item
   max_items: 120         # per-flush cap; truncation is always announced
 ```
 
@@ -182,6 +183,16 @@ Codex auth) probe the model allow-list empirically — it shifts.
 runtime; `setup.py` respects a `prefilter: false` registry override so a
 user can opt out declaratively. Document both in the README.
 
+### 4.9 Windows wrappers (in scope for v0.2 — decided)
+
+The Python cores are already portable. v0.2 ships `.ps1` equivalents of the
+two new wrappers (`triage_prefilter.ps1`, `notify_prefilter.ps1`) alongside
+the bash ones, and CI adds a `windows-latest` job that runs the Python test
+suite and a PowerShell syntax check (`pwsh -NoProfile -Command
+Get-Command -Syntax`-level smoke, since no Windows Hermes host is available
+to the maintainer). Porting the Layer-1 sensor wrappers is tracked as a
+good-first-issue, not a v0.2 blocker.
+
 ## 5. Migration
 
 - `setup.py` sync updates existing installs' cron jobs (cadence + script
@@ -191,6 +202,21 @@ user can opt out declaratively. Document both in the README.
   with the Layer 1.5 gate box; add the measured before/after table.
 - `docs/architecture.md`: new section "Wake gates & the prefilter layer";
   `docs/writing-a-sensor.md`: stable-handle guidance (§4.2).
+
+## 5b. Release & versioning mechanism (new for 0.2)
+
+The repo currently has version strings in **three places** that will drift:
+`signal-triage-notify/.well-known/skills/index.json` and both SKILL.md
+frontmatters. v0.2 introduces:
+
+- **Semver git tags** (`v0.2.0`) as the release identity.
+- **`CHANGELOG.md`** in Keep-a-Changelog format; the 0.2.0 entry is this
+  PRD's summary. Unreleased section maintained going forward.
+- **`scripts/bump_version.py`** — single command that updates index.json +
+  both SKILL.md frontmatters, prepends a CHANGELOG stub, and prints the tag
+  command. CI fails the build if the three version strings disagree
+  (consistency check runs on every PR, not just releases).
+- GitHub Releases created from the tag with the CHANGELOG entry as notes.
 
 ## 6. Testing (CI-able, no LLM required)
 
@@ -202,7 +228,9 @@ user can opt out declaratively. Document both in the README.
    alert pending → wake; corrupt db → wake.
 4. Golden-output test: fixture log + fixture ledger → exact prefilter stdout
    (protects the prompt contract the skill depends on).
-5. GitHub Actions: pytest on 3.11/3.12, shellcheck on the wrappers.
+5. GitHub Actions: pytest on 3.11/3.12 (ubuntu + windows-latest),
+   shellcheck on the bash wrappers, PowerShell syntax check on the `.ps1`
+   wrappers, version-consistency check (§5b).
 
 ## 7. Success metrics
 
@@ -217,23 +245,21 @@ README):
 | Worst-case alert latency | ~1h triage + up to 1h notify | ≤ debounce + 30 min |
 | Empty-day cost | 36 full sessions | 0 tokens |
 
-## 8. Open questions (iterate here)
+## 8. Decisions (resolved interactively, 2026-07-06)
 
-1. **Where does the prefilter live?** All scripts currently ship under
-   `skills/signal-notify/scripts/` (the "sensor framework" home). Proposal:
-   keep them there for tap-layout simplicity, referenced by both skills —
-   but a `scripts/` top-level shared home is cleaner if agentskills.io
-   allows non-skill dirs. Decide before implementation.
-2. **Debounce default**: 90 min suits a personal-assistant profile. Should
-   the seeded `policy.yaml` default to 90 or 30? (Reference deployment: 90.)
-3. **Per-sensor debounce exemptions?** e.g. a flood-warning sensor might
-   warrant `debounce_minutes: 0` for its category. This reintroduces
-   content-awareness through configuration (acceptable? it's declarative,
-   not heuristic). Deferred unless a real need appears.
-4. **Non-Hermes runtimes**: is documenting the graceful degradation (§4.4)
-   enough for v0.2, or do we want a generic cron wrapper example?
-5. **Windows**: the wrapper scripts are bash; the Python cores are portable.
-   Ship `.ps1` wrappers now or defer to a contributor?
+1. **Prefilter location** → `skills/signal-notify/scripts/` (the existing
+   framework home; triage references cross-skill, same as sensors).
+2. **Seeded debounce default** → **30 min** (reference deployment keeps 90;
+   documented as the cost-optimal setting).
+3. **Per-sensor/category debounce exemptions** → **deferred to v0.3**;
+   declarative per-category overrides reconsidered only when a real sensor
+   needs it (content-blind purity holds for v0.2).
+4. **Non-Hermes runtimes** → document graceful degradation only (§4.4);
+   no generic wrapper example in v0.2.
+5. **Windows** → **in scope**: ship `.ps1` wrappers for the two prefilters
+   + windows CI job (§4.9); sensor-wrapper ports are good-first-issues.
+6. **Versioning** → tags + CHANGELOG + bump script with CI consistency
+   check (§5b).
 
 ## 9. Provenance
 
